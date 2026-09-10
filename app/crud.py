@@ -6,6 +6,8 @@ database. Keeping that logic out of main.py keeps your route
 handlers thin and makes this stuff easy to unit test later.
 """
 
+from datetime import date
+
 from sqlalchemy.orm import Session
 from sqlalchemy import extract, func
 from . import models, schemas
@@ -87,9 +89,9 @@ def get_isa_contributions_this_tax_year(db: Session) -> float:
     return total or 0.0
 
 
-def calculate_savings_plan(
-    db: Session, disposable_income: float, emergency_fund_target: float
-) -> schemas.SavingsPlanResponse:
+def calculate_budget(
+    db: Session, year: int, month: int, emergency_fund_target: float
+) -> schemas.BudgetCalculatorResponse:
     """
     The core allocation rule:
       - While the emergency fund is below target: split disposable
@@ -99,6 +101,16 @@ def calculate_savings_plan(
         remaining annual allowance - anything over that is redirected
         to a general (taxable) investment account instead.
     """
+    income_entries = get_income_for_month(db, year, month)
+    expense_entries = get_expenses_for_month(db, year, month)
+    total_income = sum(entry.amount for entry in income_entries)
+    total_expenses = sum(entry.amount for entry in expense_entries)
+    disposable_income = total_income - total_expenses
+    available_savings = max(disposable_income, 0.0)
+    savings_rate = (
+        available_savings / total_income * 100 if total_income > 0 else 0.0
+    )
+
     emergency_fund_balance = get_balance(db, models.AccountType.emergency_fund)
     isa_contributions_this_tax_year = get_isa_contributions_this_tax_year(db)
     isa_allowance_remaining = max(
@@ -106,22 +118,27 @@ def calculate_savings_plan(
     )
 
     if emergency_fund_balance < emergency_fund_target:
-        emergency_fund_contribution = min(disposable_income * 0.5, emergency_fund_target - emergency_fund_balance)
-        isa_desired = disposable_income - emergency_fund_contribution
+        emergency_fund_contribution = min(available_savings * 0.5, emergency_fund_target - emergency_fund_balance)
+        isa_desired = available_savings - emergency_fund_contribution
     else:
         emergency_fund_contribution = 0.0
-        isa_desired = disposable_income
+        isa_desired = available_savings
 
     # Cap the ISA contribution at whatever allowance is left this tax year.
     isa_contribution = min(isa_desired, isa_allowance_remaining)
-    other_investment_contribution = isa_desired - isa_contribution
+    future_savings_contribution = isa_desired - isa_contribution
 
-    return schemas.SavingsPlanResponse(
+    return schemas.BudgetCalculatorResponse(
+        month=date(year, month, 1),
+        total_income=total_income,
+        total_expenses=total_expenses,
+        disposable_income=disposable_income,
+        savings_rate=savings_rate,
         emergency_fund_balance=emergency_fund_balance,
         emergency_fund_target=emergency_fund_target,
         emergency_fund_contribution=emergency_fund_contribution,
         isa_contributions_this_tax_year=isa_contributions_this_tax_year,
         isa_allowance_remaining=isa_allowance_remaining,
         isa_contribution=isa_contribution,
-        other_investment_contribution=other_investment_contribution,
+        future_savings_contribution=future_savings_contribution,
     )

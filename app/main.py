@@ -8,7 +8,7 @@ from datetime import date
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 
-from . import models, schemas, crud
+from . import models, schemas, crud, projections
 from .database import engine, get_db
 
 # Creates the income/expenses tables in money_trees.db if they don't
@@ -65,16 +65,17 @@ def add_portfolio_contribution(
     return crud.create_portfolio_contribution(db, contribution)
 
 
-@app.post("/savings-plan", response_model=schemas.SavingsPlanResponse)
-def savings_plan(request: schemas.SavingsPlanRequest, db: Session = Depends(get_db)):
+@app.post("/budget-calculator", response_model=schemas.BudgetCalculatorResponse)
+def budget_calculator(
+    request: schemas.BudgetCalculatorRequest, db: Session = Depends(get_db)
+):
     """
-    Given this month's disposable income and your emergency fund
-    target, returns how much to put into the emergency fund vs ISA
-    (50/50 until the target is met, then 100% ISA) - capped at
-    whatever ISA allowance you have left for the current tax year.
+    Reads this month's stored income and expenses, then recommends how
+    to allocate the resulting disposable income between the emergency
+    fund, ISA, and future savings.
     """
-    return crud.calculate_savings_plan(
-        db, request.disposable_income, request.emergency_fund_target
+    return crud.calculate_budget(
+        db, request.year, request.month, request.emergency_fund_target
     )
     
 @app.get("/portfolio/summary", response_model=schemas.PortfolioSummary)
@@ -84,4 +85,40 @@ def portfolio_summary(db: Session = Depends(get_db)):
         isa_balance=crud.get_balance(db, models.AccountType.isa),
         other_investment_balance=crud.get_balance(db, models.AccountType.other_investment),
         isa_contributions_this_tax_year=crud.get_isa_contributions_this_tax_year(db),
+    )
+
+
+@app.post("/projections", response_model=schemas.ProjectionResponse)
+def projections_calculator(request: schemas.ProjectionRequest):
+    """Project investment growth across conservative, base, and optimistic scenarios."""
+    results = projections.project_all_scenarios(
+        horizon_years=request.horizon_years,
+        starting_isa_balance=request.starting_balances.isa,
+        starting_taxable_balance=request.starting_balances.taxable_investments,
+        monthly_isa_contribution=request.monthly_contributions.isa,
+        monthly_taxable_contribution=request.monthly_contributions.taxable_investments,
+        annual_inflation_rate=request.assumptions.inflation_rate / 100,
+        annual_fee_rate=request.assumptions.annual_fee_rate / 100,
+    )
+    scenarios = [
+        schemas.ProjectionScenario(
+            name=result.name,
+            annual_return=result.annual_return_rate,
+            ending_nominal_value=result.ending_nominal_value,
+            ending_real_value=result.ending_real_value,
+            total_contributions=result.total_contributions,
+            estimated_growth=result.estimated_growth,
+            estimated_fees=result.estimated_fees,
+            timeline=[schemas.ProjectionTimelinePoint(**point.__dict__) for point in result.timeline],
+        )
+        for result in results
+    ]
+    return schemas.ProjectionResponse(
+        horizon_years=request.horizon_years,
+        starting_balance=(
+            request.starting_balances.isa
+            + request.starting_balances.taxable_investments
+        ),
+        total_contributions=scenarios[0].total_contributions,
+        scenarios=scenarios,
     )

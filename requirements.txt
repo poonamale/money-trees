@@ -2,3 +2,8 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 pydantic
+pytest
+httpx
+requests
+streamlit
+pandas
